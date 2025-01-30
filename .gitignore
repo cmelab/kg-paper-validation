@@ -1,0 +1,7 @@
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Test files
+*.txt
+*.csv
+*.gsd
