@@ -70,9 +70,9 @@ def production_done(job):
 
 def get_ref_values(job):
     """These are the reference values for PPS."""
-    ref_length = 0.3438 * Unit("nm")
-    ref_mass = 32.06 * Unit("amu")
-    ref_energy = 1.065 * Unit("kJ/mol")
+    ref_length = 1.0 * Unit("nm")
+    ref_mass = 1.0 * Unit("amu")
+    ref_energy = 1.0 * Unit("kJ/mol")
     ref_values_dict = {
         "length": ref_length,
         "mass": ref_mass,
@@ -165,10 +165,16 @@ def make_cg_system_lattice(job):
 
 def get_ff(job):
     """"""
-    msibi_project = signac.get_project(job.sp.msibi_project)
-    msibi_job = msibi_project.open_job(id=job.sp.msibi_job)
-    with open(msibi_job.fn("pps-msibi.pickle"), "rb") as f:
-        hoomd_ff = pickle.load(f)
+    ff = BeadSpring(
+    r_cut=2.5,
+    beads={
+        "A": dict(epsilon=1, sigma=1.0),
+    },
+    bonds={
+        "A-A": dict(r0=0.64, k=500),
+    },)
+    hoomd_ff = ff.hoomd_forces
+    
     return hoomd_ff
 
 
