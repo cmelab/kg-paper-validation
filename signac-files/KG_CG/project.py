@@ -13,7 +13,7 @@ import os
 from unyt import Unit
 
 
-class PPSCG(FlowProject):
+class KGCG(FlowProject):
     pass
 
 
@@ -43,33 +43,32 @@ class Fry(DefaultSlurmEnvironment):
         )
 
 
-@PPSCG.label
+@KGCG.label
 def system_built(job):
     return job.isfile("init_frame.gsd")
 
 
-@PPSCG.label
+@KGCG.label
 def initial_run_done(job):
     return job.doc.runs > 0
 
 
-@PPSCG.label
+@KGCG.label
 def equilibrated(job):
     return job.doc.equilibrated
 
 
-@PPSCG.label
+@KGCG.label
 def sampled(job):
     return job.doc.sampled
 
 
-@PPSCG.label
+@KGCG.label
 def production_done(job):
     return job.isfile("production-restart.gsd")
 
 
 def get_ref_values(job):
-    """These are the reference values for PPS."""
     ref_length = 1.0 * Unit("nm")
     ref_mass = 1.0 * Unit("amu")
     ref_energy = 1.0 * Unit("kJ/mol")
@@ -87,28 +86,12 @@ def get_ref_values(job):
     return ref_values_dict
 
 
-def make_cg_system_bulk(job):
-    from flowermd.base import Pack,Polymer
-
-    job.doc.n_particles = int(job.doc.num_mols * job.doc.lengths)
-
-    chains = Polymer(num_mols=job.doc.num_mols, lengths=job.doc.lengths)
-    chains.coarse_grain(beads={"A": "c1cc(S)ccc1"})
-    ref_values = get_ref_values(job)
-    system = Pack(
-            molecules=chains,
-            density=job.sp.density,
-            base_units=ref_values
-    )
-    return system
-
-
 def make_cg_system_lattice(job):
     """Make an initial lattice of long polymer chains"""
     import math
 
     from flowermd.base import System
-    from flowermd.library import PPS
+    from flowermd.library import KremerGrestBeadSpring, LJChain
     from flowermd.utils import get_target_box_mass_density
     import numpy as np
     import mbuild as mb
@@ -133,7 +116,6 @@ def make_cg_system_lattice(job):
                     layer.add(comp)
                     count += 1
                 layer.translate(np.array([0, sep * i, 0]))
-                system.add(layer)
                 layer_num += 1
             # Make last incomplete layer
             if count != self.n_molecules:
@@ -155,8 +137,7 @@ def make_cg_system_lattice(job):
 
     job.doc.n_particles = int(job.doc.num_mols * job.doc.lengths)
 
-    chains = PPS(num_mols=job.doc.num_mols, lengths=job.doc.lengths)
-    chains.coarse_grain(beads={"A": "c1cc(S)ccc1"})
+    chains = LJChain(num_mols=job.doc.num_mols, lengths=job.doc.lengths)
     ref_values = get_ref_values(job)
     system = Lattice(molecules=chains, base_units=ref_values)
     job.doc.system_mass_g = system.mass.to("g").value
@@ -165,21 +146,16 @@ def make_cg_system_lattice(job):
 
 def get_ff(job):
     """"""
-    ff = BeadSpring(
-    r_cut=2.5,
-    beads={
-        "A": dict(epsilon=1, sigma=1.0),
-    },
-    bonds={
-        "A-A": dict(r0=0.64, k=500),
-    },)
+    from flowermd.library import KremerGrestBeadSpring
+    ff = KremerGrestBeadSpring(
+        bond_k=2.5,bond_max=2.5)
     hoomd_ff = ff.hoomd_forces
     
     return hoomd_ff
 
 
-@PPSCG.post(system_built)
-@PPSCG.operation(
+@KGCG.post(system_built)
+@KGCG.operation(
     directives={"ngpu": 0, "ncpu": 1, "executable": "python -u"}, name="build"
 )
 def build(job):
@@ -195,9 +171,9 @@ def build(job):
         print("Finished.")
 
 
-@PPSCG.pre(system_built)
-@PPSCG.post(initial_run_done)
-@PPSCG.operation(
+@KGCG.pre(system_built)
+@KGCG.post(initial_run_done)
+@KGCG.operation(
     directives={"ngpu": 1, "ncpu": 1, "executable": "python -u"}, name="run"
 )
 def run(job):
@@ -215,16 +191,6 @@ def run(job):
         print("------------------------------------")
 
         hoomd_ff = get_ff(job)
-        for force in hoomd_ff:
-            if isinstance(force, hoomd.md.bond.Table):
-                if job.sp.harmonic_bonds:
-                    print("Replacing bond table potential with harmonic")
-                    hoomd_ff.remove(force)
-                    harmonic_bond = hoomd.md.bond.Harmonic()
-                    harmonic_bond.params["A-A"] = dict(k=1777.6, r0=1.4226)
-                    hoomd_ff.append(harmonic_bond)
-            else:
-                pass
         # Store reference units and values
         ref_values_dict = get_ref_values(job)
         # Set up Simulation obj
@@ -249,7 +215,7 @@ def run(job):
         job.doc.real_time_step = sim.real_timestep.to("fs").value
         job.doc.real_time_units = "fs"
         target_box = get_target_box_mass_density(
-                mass=job.doc.system_mass_g * Unit("g"),
+                mass=job.sp.mass * Unit("g"),
                 density=job.sp.density * Unit("g/cm**3")
         )
         job.doc.target_box = target_box.value
@@ -272,9 +238,9 @@ def run(job):
         job.doc.runs = 1
         print("Simulation finished.")
 
-@PPSCG.pre(initial_run_done)
-@PPSCG.post(equilibrated)
-@PPSCG.operation(
+@KGCG.pre(initial_run_done)
+@KGCG.post(equilibrated)
+@KGCG.operation(
     directives={"ngpu": 1, "ncpu": 1, "executable": "python -u"},
     name="run-longer"
 )
@@ -295,7 +261,6 @@ def run_longer(job):
         gsd_path = job.fn(f"trajectory{job.doc.runs}.gsd")
         log_path = job.fn(f"log{job.doc.runs}.txt")
         ref_values = get_ref_values(job)
-
         sim = Simulation(
             initial_state=job.fn("restart.gsd"),
             forcefield=hoomd_ff,
@@ -317,9 +282,9 @@ def run_longer(job):
         job.doc.runs += 1
         print("Simulation finished.")
 
-@PPSCG.pre(equilibrated)
-@PPSCG.post(production_done)
-@PPSCG.operation(
+@KGCG.pre(equilibrated)
+@KGCG.post(production_done)
+@KGCG.operation(
     directives={"ngpu": 1, "ncpu": 1, "executable": "python -u"},
     name="production"
 )
@@ -341,10 +306,10 @@ def production_run(job):
 
         gsd_path = job.fn(f"production.gsd")
         log_path = job.fn(f"production.txt")
-        ref_values = get_ref_values(job)
 
+        ref_values = get_ref_values(job)
         sim = Simulation(
-            initial_state=job.fn("restart.gsd"),
+            initial_state = job.fn("restart.gsd"),
             forcefield=hoomd_ff,
             reference_values=ref_values,
             dt=job.sp.dt,
@@ -365,9 +330,9 @@ def production_run(job):
         print("Simulation finished.")
    
 
-@PPSCG.pre(production_done)
-@PPSCG.post(sampled)
-@PPSCG.operation(
+@KGCG.pre(production_done)
+@KGCG.post(sampled)
+@KGCG.operation(
     directives={"ngpu": 1, "ncpu": 1, "executable": "python -u"},
     name="production_run_longer"
 )
@@ -389,8 +354,8 @@ def production_run_longer(job):
 
         gsd_path = job.fn(f"production{job.doc.production_runs+1}.gsd")
         log_path = job.fn(f"production{job.doc.production_runs+1}.txt")
-        ref_values = get_ref_values(job)
 
+        ref_values = get_ref_values(job)
         sim = Simulation(
             initial_state=job.fn("production-restart.gsd"),
             forcefield=hoomd_ff,
@@ -412,9 +377,9 @@ def production_run_longer(job):
         print("Simulation finished.")
         job.doc.production_runs += 1
 
-@PPSCG.pre(production_done)
-@PPSCG.post(sampled)
-@PPSCG.operation(
+@KGCG.pre(production_done)
+@KGCG.post(sampled)
+@KGCG.operation(
     directives={"ngpu": 0, "ncpu": 1, "executable": "python -u"},
     name="sample"
 )

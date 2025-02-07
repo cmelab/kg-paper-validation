@@ -39,11 +39,6 @@ def get_parameters():
     parameters["gsd_write_freq"] = [1e6]
     parameters["log_write_freq"] = [1e4]
     parameters["sim_seed"] = [42]
-    # Get FF from the MSIBI Project
-    parameters["msibi_project"] = [
-        "/home/erjank_project/pps-entanglement-length/Entanglements/angle-flow-with-pairs"
-    ]
-    parameters["msibi_job"] = ["34c9e9f8fa7d942743adbf6835395671"]
     return list(parameters.keys()), list(product(*parameters.values()))
 
 
