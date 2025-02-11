@@ -27,11 +27,10 @@ def get_parameters():
         (20, 150)
         ]
     parameters["density"] = [0.85]
-    parameters["harmonic_bonds"] = [False]
     parameters["kT"] = [1.0]
     parameters["n_equil_steps"] = [5e7]
     parameters["n_prod_steps"] = [1e8]
-    parameters["shrink_kT"] = [7.0]
+    parameters["shrink_kT"] = [2.0]
     parameters["n_shrink_steps"] = [5e7]
     parameters["shrink_period"] = [10000]
     parameters["dt"] = [0.005]

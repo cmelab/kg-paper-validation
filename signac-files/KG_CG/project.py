@@ -67,82 +67,15 @@ def sampled(job):
 def production_done(job):
     return job.isfile("production-restart.gsd")
 
+def pack_system(job):
+    from flowermd.base import Pack
+    from flowermd.library import LJChain
+    
+    kg_chain = LJChain(lengths=job.doc.lengths,num_mols=job.doc.num_mols)
+    ff = get_ff(job)
+    cg_system = Pack(molecules=kg_chain, density=job.sp.density*Unit("nm**-3"), packing_expand_factor=14,edge=2,overlap=1)
 
-def get_ref_values(job):
-    ref_length = 1.0 * Unit("nm")
-    ref_mass = 1.0 * Unit("amu")
-    ref_energy = 1.0 * Unit("kJ/mol")
-    ref_values_dict = {
-        "length": ref_length,
-        "mass": ref_mass,
-        "energy": ref_energy
-    }
-    job.doc.ref_length = ref_length.value
-    job.doc.ref_length_units = "nm"
-    job.doc.ref_energy = ref_energy.value
-    job.doc.ref_energy_units = "kJ/mol"
-    job.doc.ref_mass = ref_mass.value
-    job.doc.ref_mass_units = "amu"
-    return ref_values_dict
-
-
-def make_cg_system_lattice(job):
-    """Make an initial lattice of long polymer chains"""
-    import math
-
-    from flowermd.base import System
-    from flowermd.library import KremerGrestBeadSpring, LJChain
-    from flowermd.utils import get_target_box_mass_density
-    import numpy as np
-    import mbuild as mb
-
-    class Lattice(System):
-        def __init__(self, molecules, base_units=dict()):
-            super(Lattice, self).__init__(
-                    molecules=molecules, base_units=base_units
-            )
-
-        def _build_system(self):
-            n_per = math.ceil(np.sqrt(self.n_molecules))
-            system = mb.Compound()
-            sep = 4
-            count = 0
-            layer_num = 0
-            for i in range(self.n_molecules // n_per):
-                layer = mb.Compound()
-                for j in range(n_per):
-                    comp = self.all_molecules[count]
-                    comp.translate(np.array([sep * j, 0, 0]))
-                    layer.add(comp)
-                    count += 1
-                layer.translate(np.array([0, sep * i, 0]))
-                layer_num += 1
-            # Make last incomplete layer
-            if count != self.n_molecules:
-                last_layer = mb.Compound()
-                for j, comp in enumerate(self.all_molecules[count:]):
-                    comp.translate(np.array([sep * j, 0, 0]))
-                    last_layer.add(comp)
-                last_layer.translate(np.array([0, sep * layer_num , 0]))
-                system.add(last_layer)
-
-            box = system.get_boundingbox()
-            system.box = mb.box.Box(
-                    np.array([box.lengths[0]+sep, box.lengths[1]+sep, box.lengths[2]+sep])
-            )
-            system.translate_to(
-                    (system.box.Lx / 2, system.box.Ly / 2, system.box.Lz / 2)
-            )
-            return system
-
-    job.doc.n_particles = int(job.doc.num_mols * job.doc.lengths)
-
-    chains = LJChain(num_mols=job.doc.num_mols, lengths=job.doc.lengths)
-    ref_values = get_ref_values(job)
-    system = Lattice(molecules=chains, base_units=ref_values)
-    job.doc.system_mass_g = system.mass.to("g").value
-    return system
-
+    return cg_system
 
 def get_ff(job):
     """"""
@@ -152,7 +85,6 @@ def get_ff(job):
     hoomd_ff = ff.hoomd_forces
     
     return hoomd_ff
-
 
 @KGCG.post(system_built)
 @KGCG.operation(
@@ -166,7 +98,7 @@ def build(job):
         print(job.id)
         print("------------------------------------")
         print("Building initial frame.")
-        system = make_cg_system_lattice(job)
+        system = pack_system(job)
         system.to_gsd(job.fn("init_frame.gsd"))
         print("Finished.")
 
@@ -182,7 +114,7 @@ def run(job):
     from unyt import Unit
     import flowermd
     from flowermd.base import Simulation
-    from flowermd.utils import get_target_box_mass_density
+    from flowermd.utils import get_target_box_number_density
     import hoomd
     with job:
         print("------------------------------------")
@@ -191,8 +123,6 @@ def run(job):
         print("------------------------------------")
 
         hoomd_ff = get_ff(job)
-        # Store reference units and values
-        ref_values_dict = get_ref_values(job)
         # Set up Simulation obj
         gsd_path = job.fn(f"trajectory{job.doc.runs}.gsd")
         log_path = job.fn(f"log{job.doc.runs}.txt")
@@ -200,7 +130,6 @@ def run(job):
         sim = Simulation(
             initial_state=job.fn("init_frame.gsd"),
             forcefield=hoomd_ff,
-            reference_values=ref_values_dict,
             dt=job.sp.dt,
             gsd_write_freq=job.sp.gsd_write_freq,
             gsd_file_name=gsd_path,
@@ -214,10 +143,10 @@ def run(job):
         job.doc.tau_kT = tau_kT
         job.doc.real_time_step = sim.real_timestep.to("fs").value
         job.doc.real_time_units = "fs"
-        target_box = get_target_box_mass_density(
-                mass=job.sp.mass * Unit("g"),
-                density=job.sp.density * Unit("g/cm**3")
-        )
+        target_box = get_target_box_number_density(
+                density=job.sp.density * Unit("nm**-3"),
+                n_beads= job.doc.num_mols*job.doc.lengths)
+
         job.doc.target_box = target_box.value
         shrink_kT_ramp = sim.temperature_ramp(
                 n_steps=job.sp.n_shrink_steps,
@@ -260,11 +189,9 @@ def run_longer(job):
             hoomd_ff = pickle.load(f)
         gsd_path = job.fn(f"trajectory{job.doc.runs}.gsd")
         log_path = job.fn(f"log{job.doc.runs}.txt")
-        ref_values = get_ref_values(job)
         sim = Simulation(
             initial_state=job.fn("restart.gsd"),
             forcefield=hoomd_ff,
-            reference_values=ref_values,
             dt=job.sp.dt,
             gsd_write_freq=job.sp.gsd_write_freq,
             gsd_file_name=gsd_path,
@@ -307,11 +234,9 @@ def production_run(job):
         gsd_path = job.fn(f"production.gsd")
         log_path = job.fn(f"production.txt")
 
-        ref_values = get_ref_values(job)
         sim = Simulation(
             initial_state = job.fn("restart.gsd"),
             forcefield=hoomd_ff,
-            reference_values=ref_values,
             dt=job.sp.dt,
             gsd_write_freq=int(5e5),
         gsd_file_name=gsd_path,
@@ -355,11 +280,9 @@ def production_run_longer(job):
         gsd_path = job.fn(f"production{job.doc.production_runs+1}.gsd")
         log_path = job.fn(f"production{job.doc.production_runs+1}.txt")
 
-        ref_values = get_ref_values(job)
         sim = Simulation(
             initial_state=job.fn("production-restart.gsd"),
             forcefield=hoomd_ff,
-            reference_values=ref_values,
             dt=job.sp.dt,
             gsd_write_freq=int(5e5),
         gsd_file_name=gsd_path,
@@ -416,4 +339,4 @@ def sample(job):
         job.doc.sampled = True
         
 if __name__ == "__main__":
-    PPSCG(environment=Fry).main()
+    KGCG(environment=Fry).main()
