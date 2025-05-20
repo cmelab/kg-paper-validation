@@ -30,14 +30,13 @@ def get_parameters():
     parameters["kT"] = [1.0]
     parameters["n_equil_steps"] = [5e7]
     parameters["n_prod_steps"] = [1e8]
-    parameters["shrink_kT"] = [2.0]
     parameters["n_shrink_steps"] = [5e7]
     parameters["shrink_period"] = [10000]
-    parameters["dt"] = [0.005]
-    parameters["tau_kT"] = [100]
+    parameters["dt"] = [0.0001]
+    #parameters["tau_kT"] = [100]
     parameters["gsd_write_freq"] = [1e6]
     parameters["log_write_freq"] = [1e4]
-    parameters["sim_seed"] = [42]
+    parameters["sim_seed"] = [1,2,3,4,5,6,7,8,9,10]
     return list(parameters.keys()), list(product(*parameters.values()))
 
 

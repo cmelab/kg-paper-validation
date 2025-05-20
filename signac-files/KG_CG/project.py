@@ -67,41 +67,47 @@ def sampled(job):
 def production_done(job):
     return job.isfile("production-restart.gsd")
 
-def pack_system(job):
-    from flowermd.base import Pack
-    from flowermd.library import LJChain
-    
-    kg_chain = LJChain(lengths=job.doc.lengths,num_mols=job.doc.num_mols)
-    ff = get_ff(job)
-    cg_system = Pack(molecules=kg_chain, density=job.sp.density*Unit("nm**-3"), packing_expand_factor=14,edge=2,overlap=1)
-
-    return cg_system
-
-def get_ff(job):
-    """"""
-    from flowermd.library import KremerGrestBeadSpring
-    ff = KremerGrestBeadSpring(
-        bond_k=2.5,bond_max=2.5)
-    hoomd_ff = ff.hoomd_forces
-    
-    return hoomd_ff
-
 @KGCG.post(system_built)
 @KGCG.operation(
-    directives={"ngpu": 0, "ncpu": 1, "executable": "python -u"}, name="build"
+    directives={"ngpu": 1, "ncpu": 1, "executable": "python -u"}, name="build"
 )
 def build(job):
-    """Run the initial configuration builder on CPU"""
+    """Build system."""
+    import mbuild as mb
+    from mbuild.path import HardSphereRandomWalk
+    from mbuild import Polymer
+    import numpy as np
+    from scipy.spatial.distance import pdist
+    import freud
+    
     with job:
         print("------------------------------------")
         print("JOB ID NUMBER:")
         print(job.id)
         print("------------------------------------")
-        print("Building initial frame.")
-        system = pack_system(job)
-        system.to_gsd(job.fn("init_frame.gsd"))
-        print("Finished.")
 
+    chain_length = job.doc.lengths
+    n_chains = job.doc.num_mols
+    
+    seeds = [np.random.randint(low=1) for i in range(n_chains)]
+    chains = []
+    
+    for seed in seeds:
+        rw_path = HardSphereRandomWalk(
+            N=chain_length,
+            bond_length=1.12,
+            radius=1.1,
+            min_angle=np.pi/2,
+            max_angle=2.5,
+            max_attempts=1e4,
+            seed=seed,
+        )
+        rw_path.generate()
+        chains.append(rw_path.to_compound(bead_name="A", bead_mass=1.0))
+    a = int(chain_length//2 + 25)
+    box = mb.fill_box(compound=chains, n_compounds=[1 for i in chains], box=[a,a,a],overlap=2,edge=3)
+    box.check_for_overlap(minimum_distance=1.0, excluded_bond_depth=1)
+    box.save(job.fn("init_frame.gsd"))
 
 @KGCG.pre(system_built)
 @KGCG.post(initial_run_done)
@@ -109,11 +115,13 @@ def build(job):
     directives={"ngpu": 1, "ncpu": 1, "executable": "python -u"}, name="run"
 )
 def run(job):
-    """Run initial single-chain simulation."""
+    """Run initial simulation."""
     import unyt
     from unyt import Unit
+    import numpy
     import flowermd
     from flowermd.base import Simulation
+    from flowermd.library import KremerGrestBeadSpring
     from flowermd.utils import get_target_box_number_density
     import hoomd
     with job:
@@ -122,43 +130,39 @@ def run(job):
         print(job.id)
         print("------------------------------------")
 
-        hoomd_ff = get_ff(job)
-        # Set up Simulation obj
+
+        ff = KremerGrestBeadSpring(bond_k=100,bond_max=1.15,sigma=1.0)
         gsd_path = job.fn(f"trajectory{job.doc.runs}.gsd")
         log_path = job.fn(f"log{job.doc.runs}.txt")
-
+        seed = numpy.random.randint(1,1e4)
         sim = Simulation(
             initial_state=job.fn("init_frame.gsd"),
-            forcefield=hoomd_ff,
+            forcefield=ff.hoomd_forces,
             dt=job.sp.dt,
             gsd_write_freq=job.sp.gsd_write_freq,
             gsd_file_name=gsd_path,
             log_write_freq=job.sp.log_write_freq,
             log_file_name=log_path,
-            seed=job.sp.sim_seed,
+            seed=seed,
         )
+
+        target_box = get_target_box_number_density(density=job.sp.density*Unit("nm**-3"),n_beads=job.doc.num_mols*job.doc.lengths)
         sim.pickle_forcefield(job.fn("forcefield.pickle"))
         # Store more unit information in job doc
-        tau_kT = job.sp.dt * job.sp.tau_kT
+        tau_kT = job.sp.dt * 100
         job.doc.tau_kT = tau_kT
         job.doc.real_time_step = sim.real_timestep.to("fs").value
         job.doc.real_time_units = "fs"
-        target_box = get_target_box_number_density(
-                density=job.sp.density * Unit("nm**-3"),
-                n_beads= job.doc.num_mols*job.doc.lengths)
-
         job.doc.target_box = target_box.value
-        shrink_kT_ramp = sim.temperature_ramp(
-                n_steps=job.sp.n_shrink_steps,
-                kT_start=job.sp.shrink_kT,
-                kT_final=job.sp.kT
-        )
+        job.doc.seed = seed
+    
         sim.run_update_volume(
-                final_box_lengths=target_box,
-                n_steps=job.sp.n_shrink_steps,
-                period=job.sp.shrink_period,
-                tau_kt=tau_kT,
-                kT=shrink_kT_ramp
+            final_box_lengths=target_box,
+            kT=3.0,
+            n_steps=1e5,
+            tau_kt=100*job.sp.dt,
+            period=10,
+            thermalize_particles=True
         )
         sim.save_restart_gsd(job.fn("shrink_restart.gsd"))
         print("Shrinking simulation finished...")
@@ -197,11 +201,11 @@ def run_longer(job):
             gsd_file_name=gsd_path,
             log_write_freq=job.sp.log_write_freq,
             log_file_name=log_path,
-            seed=job.sp.sim_seed,
+            seed=job.doc.seed,
         )
         print("Running simulation.")
         sim.run_NVT(
-            n_steps=1e7,
+            n_steps=job.sp.n_equil_steps,
             kT=job.sp.kT,
             tau_kt=job.doc.tau_kT,
         )
@@ -242,7 +246,7 @@ def production_run(job):
         gsd_file_name=gsd_path,
             log_write_freq=job.sp.log_write_freq,
             log_file_name=log_path,
-            seed=job.sp.sim_seed,
+            seed=job.doc.seed,
         )
         print("Running simulation.")
         sim.run_NVT(
@@ -256,7 +260,6 @@ def production_run(job):
    
 
 @KGCG.pre(production_done)
-@KGCG.post(sampled)
 @KGCG.operation(
     directives={"ngpu": 1, "ncpu": 1, "executable": "python -u"},
     name="production_run_longer"
@@ -288,7 +291,7 @@ def production_run_longer(job):
         gsd_file_name=gsd_path,
             log_write_freq=job.sp.log_write_freq,
             log_file_name=log_path,
-            seed=job.sp.sim_seed,
+            seed=job.doc.seed,
         )
         print("Running simulation.")
         sim.run_NVT(
@@ -301,7 +304,6 @@ def production_run_longer(job):
         job.doc.production_runs += 1
 
 @KGCG.pre(production_done)
-@KGCG.post(sampled)
 @KGCG.operation(
     directives={"ngpu": 0, "ncpu": 1, "executable": "python -u"},
     name="sample"
@@ -327,13 +329,9 @@ def sample(job):
                 msd_mode="direct"
         )
         msd_results = np.copy(msd.msd)
-        conv_factor = job.doc.ref_length**2
-        job.doc.msd_units = "nm**2"
-        msd_results *= conv_factor
         time_array = np.arange(0, len(msd.msd), 1) * ts_frame
-        np.save(file=job.fn(f"msd_time_comb_mid.npy"), arr=time_array)
-        np.save(file=job.fn(f"msd_data_real_nm_squared_comb_mid.npy"), arr=msd_results)
-        np.save(file=job.fn(f"msd_data_reduced_comb_mid.npy"), arr=msd.msd)
+        np.save(file=job.fn(f"msd_time_mid_c.npy"), arr=time_array)
+        np.save(file=job.fn(f"msd_data_reduced_mid_c.npy"), arr=msd.msd)
         
         print("Finished.")
         job.doc.sampled = True
